@@ -1,0 +1,680 @@
+Ferrum 2.0.5 — CP2102N and MCU protocol referenceTECHNICAL REFERENCE · FERRUM 2.0.5
+CP2102N + MCU integration and recovered driver commands
+
+Board discovery, status, liveness, serial commands, network command IDs and wire formats for an independent MCU implementation.
+
+Contents
+
+1. What this establishes
+
+Online checks in the desktop app
+
+2. Connecting an MCU and what it can do
+
+3. Discovery and board acceptance
+
+4. Selection, status and liveness
+
+5. Framing and checked example packets
+
+6. Virtual serial API: 44 km.* names
+
+7. DHZ network API: 24 names
+
+8. KMNet network API: 16 IDs
+
+9. Board-wire serializer: all 35 forms
+
+10. Host receive dispatch: all 52 registered entries
+
+11. Other driver interfaces and unresolved coverage
+
+12. What must be demonstrated on the custom board
+
+13. Technical provenance
+
+1. What this establishes
+
+The recovered Ferrum 2.0.5 host protocol provides a basis for building an independent MCU board behind a compatible CP2102N USB-to-UART adapter. The MCU supplies the board behavior: discovery responses, metadata, status, acknowledgements and command execution. The adapter supplies the USB/UART transport. A bare adapter does not perform those board functions.
+
+Recorded result: the original controller machine code accepted reconstructed discovery exchanges in offline emulation. Six discovery cases and eight role/status cases passed in the saved results, with Windows services and transport callbacks mocked. Forty serializer examples also matched isolated execution of the original serializer. These are existing research results, not newly performed hardware tests.
+
+Compatibility claim: an MCU can be connected to implement the documented protocol and attempt operation through Ferrum's driver without Ferrum's own PCB. Successful end-to-end operation on an independent MCU has not been demonstrated by the supplied evidence. It is therefore not established that an implementation will pass every Ferrum check.
+
+In the traced discovery routine, the board-number and firmware-version fields are stored rather than compared against a fixed secret. This is a finding about discovery acceptance, not proof that authentication, licensing, updates or every other Ferrum component is unrestricted. CRC protects frame integrity; it is not cryptographic authentication.
+
+This reference includes every recovered entry in the supplied serial, DHZ, KMNet and board-wire inventories. It is not a complete specification of every Ferrum API, every argument or the entire custom IOCTL protocol. Unresolved fields remain explicitly unresolved.
+
+Online checks in the desktop app
+
+A targeted follow-up static review traced the three direct callers of the desktop app's shared HTTP request routine at 0x140093EB0. All three construct update requests to https://update.xferrum.dev/:
+
+latest.json at 0x14108AF60: retrieves the latest version record and parses version/hash information.
+
+versions.json at 0x14108B800: retrieves the version list.
+
+versions/{major}.{minor}.{patch}.msi at 0x140093230: constructs a versioned installer download URL.
+
+These paths check HTTP status 200 and handle request/response failures. The examined callers do not append board serial numbers, licence keys or authentication tokens, and no remote genuine-board approval requirement was identified in them. Their direct call sites were cross-checked against the executable bytes. Generic TLS certificate/authentication strings in bundled networking libraries are not evidence of Ferrum account or hardware authentication.
+
+Conclusion for the inspected app: update-server communication is confirmed; online board-authentication or licence enforcement was not found. This is a bounded static result for Ferrum 2.0.5, not a live network capture or proof that every indirect path, firmware component, server behavior or future version lacks additional checks. Local driver discovery, selection and liveness requirements still apply.
+
+2. Connecting an MCU and what it can do
+
+Application / Ferrum UI
+        |
+Ferrum host interfaces and controller driver
+        |
+Ferrum CP210x filter + Silicon Labs serial driver
+        |
+USB <--> CP2102N <-- UART --> your MCU
+                                  |
+                       your implemented device behavior
+
+The analyzed INF attaches the Ferrum CP210x filter to USB\VID_10C4&PID_EA60. Matching that USB ID attaches a transport; it does not complete board discovery. The physical CP210x serial port and Ferrum's virtual serial API port are separate interfaces. COM numbers are machine-dependent. A CH343-style friendly name on the virtual port does not make it a physical CH343 adapter or a transparent UART tunnel.
+
+Connect the adapter's TX to the MCU's RX, its RX to the MCU's TX, and a common ground. Confirm the electrical levels, power arrangement and pinout for the actual boards before connection. The MCU UART must support the traced line settings and baud transitions. Do not assume the adapter's USB enumeration proves that data is reaching the MCU.
+
+CP2102N versus CP2102: the recorded hardware work used CP2102N. Ferrum configures 3,000,000 baud and issues request 0x17. Silicon Labs documents this receive-timeout request as CP2102N-only, so the evidence does not establish compatibility with an older CP2102 or every CP210x variant. Silicon Labs AN571, section 5.18.
+
+The MCU can be programmed to:
+
+Answer legacy or framed discovery and report its own board number and firmware version.
+
+Report peripheral status so the driver can select mouse, keyboard or controller command destinations.
+
+Acknowledge traffic and maintain the framed connection's liveness.
+
+Decode mouse movement, wheel, button and lock/mask messages.
+
+Decode keyboard state, key-mask and timed key-action messages.
+
+Decode controller state and the recovered proxy/message families.
+
+Drive the actual downstream hardware or interface needed by the implementation. Any USB HID device/host behavior requires corresponding MCU hardware and firmware; UART messages alone do not supply it.
+
+Those are implementation responsibilities and supported directions for development, not capabilities already demonstrated on a custom board. The original MCU firmware was not analyzed, and complete device-side semantics are not available for every message.
+
+3. Discovery and board acceptance
+
+Framed sequence
+
+The host configures a pending transport. Framed mode 2 starts at 115200 baud; mode 3 starts at 3000000 baud. It sends C3/11.
+
+The host requests a 5 ms delay, then configures 3000000 baud and a shorter receive timeout. Coordinate the MCU's baud transition with the observed request. The emulator does not validate physical timing.
+
+While the host waits in state 3, the MCU supplies C3/12 with 12 | board_number:u32LE | firmware_version:u32LE, correctly framed and checksummed.
+
+The host sends C3/13. The MCU replies with C3/13 while the host waits in state 4.
+
+The driver promotes the transport to its active list, assigns a runtime board ID, and sends AA/35 with a configuration byte and Q=0. The configuration byte's complete device-side meaning remains unresolved.
+
+The reported board number is distinct from the driver-assigned runtime ID. Offline tests accepted metadata pairs (1,2), (0,0) and (0xFFFFFFFF,0xFFFFFFFF); these are synthetic test cases, not recommended production identities. Acceptance in discovery does not establish how later UI or update paths interpret those fields.
+
+Legacy sequence
+
+The host sends 12 0A. The MCU replies 10 followed by the two u32LE metadata words. The host sends 16 0A and configures 3000000 baud. The MCU replies 16. The host sends 16 0A again and promotes the transport. The native receive parser accepts the single-byte 16; its reply does not require the host's newline.
+
+State and timing
+
+States are 0 configure/probe; 1 wait for legacy metadata; 2 wait for legacy confirmation; 3 wait for framed metadata; 4 wait for framed confirmation; 5 promote; 6 terminal/removal handling. Modes rotate 0 → 1 → 2 → 3 → 0; modes 0/1 are legacy and 2/3 framed. Modes 0/2 begin at 115200 and 1/3 at 3000000 baud. Normal wait thresholds are 100 ms. Persistent candidates older than five seconds use a one-second threshold; older nonpersistent candidates may be removed. These are code thresholds, not measured scheduling guarantees.
+
+C3/10 is a restart/reconnect signal in the traced paths, not a successful metadata reply. Premature confirmation did not promote a board in the recorded offline ordering test.
+
+Serial configuration
+
+The initial line-control buffer represents 8N1. The CP210x filter also sends 0x222024, the Silicon Labs vendor-control IOCTL, containing USB request 0x17 with values 2000 normally or 53 on the framed fast path. These correspond to receive-timeout values in microseconds. Ferrum's traced setup header differs from the printed AN571 table in request-type/length details; acceptance of that exact request must be verified on the target adapter. This setting is separate from the board discovery exchange.
+
+4. Selection, status and liveness
+
+An active connection must also become the selected destination for its intended command family. The traced mouse and controller paths return without sending when no matching active selected target exists. A successful write to the virtual serial port therefore does not prove a command reached the MCU.
+
+AA/22 body:
+22 | FLAG | VID:u16LE | PID:u16LE | LA LB LC LD |
+A[LA] | B[LB] | C[LC] | D[LD] | Q
+
+LA..LD are byte lengths. Even-length string data is decoded as UTF-16LE. FLAG is parsed as a boolean, but its full device-side meaning and the separate semantic names of all four strings remain unresolved. The VID/PID fields describe the reported peripheral; they are not automatically the adapter's USB descriptor values.
+
+The driver consults its configured device_type_cache: role 0 Mouse, 1 Keyboard, 2 MouseKeyboardCombo, 3 Controller, 4 Other. The role is a host-side classification, not a role byte placed in FLAG. Without a matching cached role, selection falls back to Mouse if that slot is empty, then Keyboard if empty, otherwise Other. Existing selected targets affect the result. Report truthful capabilities and configure the intended role; discovery alone does not select every destination.
+
+The framed active timer sends AA/21 with Q=1 and requests a 500 ms interval. Missed responses accumulate; a count greater than two causes removal/requeue, and send failures also affect handling. The raw acknowledgement is 96 | Q | (Q XOR FF). A valid acknowledgement cleared the pending/missed fields in the recorded original-code tests. Received AA messages cause a corresponding 96 acknowledgement before subtype processing.
+
+An MCU should service periodic queries, report current status, handle the initial configuration and execute its advertised commands. A protocol acknowledgement is not proof that a mouse, keyboard or controller action actually occurred. The legacy path skips the framed heartbeat logic examined here; it still requires protocol-compatible command behavior.
+
+5. Framing and checked example packets
+
+Frame(H, body) = H | COBS(body | CRC16_LE(body)) | 00
+H = C3, AA or D7
+CRC polynomial = 0x1021; initial = 0xFFFF
+No reflection; no final XOR; exclude the outer byte H
+AA includes its trailing one-byte Q inside the CRC-covered body
+
+CRC bytes are appended before COBS encoding. Legacy packets and the raw 96 acknowledgement do not use this wrapper. These reconstructed examples use synthetic metadata; they are not live board captures.
+
+ | Purpose | Wire bytes (hex) | Interpretation
+
+ | Host discovery | C3 04 11 E0 E3 00 | C3 / 11
+
+ | Example board discovery reply | C3 03 12 01 01 01 02 02 01 01 03 50 27 00 | C3 / 12, board-number word 1, firmware-version word 2; synthetic test values
+
+ | Host confirmation | C3 04 13 A2 C3 00 | C3 / 13
+
+ | Board confirmation | C3 04 13 A2 C3 00 | C3 / 13
+
+ | Example initial configuration | AA 02 35 01 03 C9 E2 00 | AA / 35, configuration byte 0, Q=0; synthetic configuration
+
+ | Periodic host query | AA 05 21 01 F9 38 00 | AA / 21, Q=1
+
+ | Acknowledgement | 96 01 FE | 96, Q=1, complement=FE
+
+6. Virtual serial API: 44 km.* names
+
+Recovered from the Ferrum 2.0.5 serial dispatcher and common KM handler. Names include the axis/axes alias and six literal +/- lock variants. Where a complete argument grammar was not recovered, this table deliberately supplies no invented invocation syntax. Local getters/settings may emit no board traffic; board actions require a suitable active selected target.
+
+ | Command | Category | Handling | Recovered behavior
+
+ | km.move | Mouse movement | Board D7/55 | Parses at least two numeric arguments; clamps to signed 16-bit values, then applies movement processing/settings. No raw text forwarding.
+
+ | km.wheel | Mouse movement | Board D7/56 | Parses a numeric amount and clamps to signed 8-bit range; zero can result in no send.
+
+ | km.left | Mouse buttons | Local state query or board D7/51 | No arguments reads cached state; argument form may send a button-state command.
+
+ | km.right | Mouse buttons | Local state query or board D7/51 | No arguments reads cached state; argument form may send a button-state command.
+
+ | km.middle | Mouse buttons | Local state query or board D7/51 | No arguments reads cached state; argument form may send a button-state command.
+
+ | km.side1 | Mouse buttons | Local state query or board D7/51 | No arguments reads cached state; argument form may send a button-state command.
+
+ | km.side2 | Mouse buttons | Local state query or board D7/51 | No arguments reads cached state; argument form may send a button-state command.
+
+ | km.click | Mouse buttons | Board D7/53 | Dedicated click handler; argument and duration semantics require a separate detailed specification.
+
+ | km.down | Keyboard | Board D7/52 | Single/multiple key action handlers. Recognized key syntax is parsed by 0x180022400.
+
+ | km.up | Keyboard | Board D7/52 | Single/multiple key action handlers. Recognized key syntax is parsed by 0x180022400.
+
+ | km.multidown | Keyboard | Board D7/52 | Single/multiple key action handlers. Recognized key syntax is parsed by 0x180022400.
+
+ | km.multiup | Keyboard | Board D7/52 | Single/multiple key action handlers. Recognized key syntax is parsed by 0x180022400.
+
+ | km.press | Keyboard | Board D7/54 | Single/multiple key press handlers with a generated duration.
+
+ | km.multipress | Keyboard | Board D7/54 | Single/multiple key press handlers with a generated duration.
+
+ | km.mask | Keyboard | Local query or board D7/43 | One key argument reads cached mask state; update form can send a mask change.
+
+ | km.isdown | Keyboard | Local cached key-state query | No board packet is needed to read the cached state.
+
+ | km.init | Keyboard | Board D7/44 | Name and message mapping confirmed; exact firmware-side action is unverified.
+
+ | km.lock_ml | Button locks | Local query or board D7/41 | Reads or changes the corresponding button lock.
+
+ | km.lock_mr | Button locks | Local query or board D7/41 | Reads or changes the corresponding button lock.
+
+ | km.lock_mm | Button locks | Local query or board D7/41 | Reads or changes the corresponding button lock.
+
+ | km.lock_ms1 | Button locks | Local query or board D7/41 | Reads or changes the corresponding button lock.
+
+ | km.lock_ms2 | Button locks | Local query or board D7/41 | Reads or changes the corresponding button lock.
+
+ | km.lock_mx | Axis locks | Local query or board D7/42 | Axis selectors 0/1, direction-mask argument 3.
+
+ | km.lock_my | Axis locks | Local query or board D7/42 | Axis selectors 0/1, direction-mask argument 3.
+
+ | km.lock_mw | Axis/wheel locks | Local query or board D7/42 | The + and - characters are literal parts of these command names; directional variants select mask 1 or 2.
+
+ | km.lock_mx+ | Axis/wheel locks | Local query or board D7/42 | The + and - characters are literal parts of these command names; directional variants select mask 1 or 2.
+
+ | km.lock_mx- | Axis/wheel locks | Local query or board D7/42 | The + and - characters are literal parts of these command names; directional variants select mask 1 or 2.
+
+ | km.lock_my+ | Axis/wheel locks | Local query or board D7/42 | The + and - characters are literal parts of these command names; directional variants select mask 1 or 2.
+
+ | km.lock_my- | Axis/wheel locks | Local query or board D7/42 | The + and - characters are literal parts of these command names; directional variants select mask 1 or 2.
+
+ | km.lock_mw+ | Axis/wheel locks | Local query or board D7/42 | The + and - characters are literal parts of these command names; directional variants select mask 1 or 2.
+
+ | km.lock_mw- | Axis/wheel locks | Local query or board D7/42 | The + and - characters are literal parts of these command names; directional variants select mask 1 or 2.
+
+ | km.controller | Controller/gamepad | Local state query or board D7/57 | Without arguments reads cached controller state. Update path builds structured controller messages; not arbitrary bytes.
+
+ | km.has_mouse | Presence queries | Local selection-state query | Reflects the controller driver's selected/available role state; does not probe hardware on each call.
+
+ | km.has_keyboard | Presence queries | Local selection-state query | Reflects the controller driver's selected/available role state; does not probe hardware on each call.
+
+ | km.has_controller | Presence queries | Local selection-state query | Reflects the controller driver's selected/available role state; does not probe hardware on each call.
+
+ | km.version | Version query | Local fixed response | Returns the string "kmbox: Ferrum". This is distinct from ferrum.version_number.
+
+ | km.keys | Reporting/settings | Local query or setting | These control reporting/notification settings. axes and axis are aliases; keys is not the keyboard key-down action.
+
+ | km.axes | Reporting/settings | Local query or setting | These control reporting/notification settings. axes and axis are aliases; keys is not the keyboard key-down action.
+
+ | km.axis | Reporting/settings | Local query or setting | These control reporting/notification settings. axes and axis are aliases; keys is not the keyboard key-down action.
+
+ | km.buttons | Reporting/settings | Local query or setting | These control reporting/notification settings. axes and axis are aliases; keys is not the keyboard key-down action.
+
+ | km.controller_axes | Reporting/settings | Local query or setting | These control reporting/notification settings. axes and axis are aliases; keys is not the keyboard key-down action.
+
+ | km.controller_buttons | Reporting/settings | Local query or setting | These control reporting/notification settings. axes and axis are aliases; keys is not the keyboard key-down action.
+
+ | km.echo | Reporting/settings | Local query or setting | Driver-side echo setting.
+
+ | km.catch_xy | Capture/query | Local movement capture/query handling | Uses driver-side captured movement state; detailed argument/timing semantics not specified by this inventory.
+
+Eight related non-KM names
+
+ | Name | Handling
+
+ | m | Alias for the km.move handler
+
+ | device.VID | Local device identity query
+
+ | device.PID | Local device identity query
+
+ | ferrum.version_number | Local version response v2.0.5
+
+ | mouse_proxy.start | Proxy control; board-message path
+
+ | mouse_proxy.stop | Proxy control; board D7/61 path
+
+ | mouse_proxy.fetch | Local buffered proxy data query
+
+ | mouse_proxy.modify | Structured proxy processing; board D7/62 path
+
+7. DHZ network API: 24 names
+
+These are bare names such as move and keydown with parenthesized arguments; do not automatically prepend km.. The dispatcher has a configured dhz_key transformation before parsing. Endpoint configuration, key handling, complete arguments and response framing are not specified by this inventory. It is not a ready-to-use client implementation.
+
+ | Command | Handling
+
+ | move | Parses coordinates; board D7/55
+
+ | wheel | Parses wheel amount; board D7/56
+
+ | left | Button-state handler; board D7/51
+
+ | right | Button-state handler; board D7/51
+
+ | middle | Button-state handler; board D7/51
+
+ | side1 | Button-state handler; board D7/51
+
+ | side2 | Button-state handler; board D7/51
+
+ | mouse | Combined mouse input handler
+
+ | keydown | Key parser and board D7/52
+
+ | keyup | Key parser and board D7/52
+
+ | mask_left | Button-mask handlers; board D7/41
+
+ | mask_right | Button-mask handlers; board D7/41
+
+ | mask_middle | Button-mask handlers; board D7/41
+
+ | mask_side1 | Button-mask handlers; board D7/41
+
+ | mask_side2 | Button-mask handlers; board D7/41
+
+ | mask_x | Axis/wheel-mask handlers; board D7/42
+
+ | mask_y | Axis/wheel-mask handlers; board D7/42
+
+ | mask_wheel | Axis/wheel-mask handlers; board D7/42
+
+ | mask_all | Combined mouse button/axis/wheel mask updates
+
+ | mask_keyboard | Set key mask; board D7/43
+
+ | dismask_keyboard | Clear key mask; board D7/43
+
+ | dismask_keyboard_all | Board D7/44
+
+ | monitor | Local monitor destination/configuration path
+
+ | system | Recognized; goes straight to response path, no system action in this branch
+
+8. KMNet network API: 16 IDs
+
+The parser reads a 32-bit command ID at header offset 0x0C after checking a minimum length of 16 bytes. The table shows hexadecimal integer IDs, not byte-order-ready packet strings. Mouse/keyboard payloads have additional length checks. Seven mouse IDs share one internal path; recognized names do not imply distinct algorithms or the action suggested by a name.
+
+ | IDs (hex) | Internal variant | Observed handling
+
+ | 27388020 | Monitor | Updates local monitor enable/port state
+
+ | 97A3AE8D, 9823AE8D, A238455A, AEDE7345, AEDE7346, FFEEAD38, 238D8212 | MouseInput | All seven IDs enter the same mouse payload path in this binary: movement, wheel and button state translated to D7/55, /56 and /51. Do not infer seven distinct implemented algorithms from seven IDs.
+
+ | 123C2C2F | KeyboardInput | Keyboard state/modifier changes translated to board D7/52 messages
+
+ | 23234343 | Mask | Mouse masking plus optional keyboard masking
+
+ | 23344343 | UnMask | Mouse-mask state handling plus optional keyboard unmask; follow code semantics rather than assuming all bits invert
+
+ | AF3C2828 | Connect | Recognized and replies through common path; no additional action in the action switch
+
+ | AA8855AA | Reboot | Recognized and replies through common path; no reboot action in the action switch
+
+ | 27382021 | Debug | Recognized and replies through common path; no debug action in the action switch
+
+ | 1D3D3323 | SetConfig | Recognized and replies through common path; no configuration change in the action switch
+
+ | 12334883 | ShowPic | Recognized and replies through common path; no display action in the action switch
+
+DHZ system and KMNet Connect, Reboot, Debug, SetConfig and ShowPic reach response paths without the corresponding downstream action in the examined switch. Both network paths ultimately use selected-board command functions. No UDP packets were transmitted in this research.
+
+9. Board-wire serializer: all 35 forms
+
+These are all forms admitted by serializer 0x180030330 in the analyzed controller. A serializer branch does not by itself establish normal runtime use, supported MCU behavior or direction. The layouts below are unframed bodies for AA/C3/D7 and complete packets for legacy/raw forms. Meanings incorporate the later handshake and host-command findings where available.
+
+ | ID | Body / raw layout | Recovered meaning | Host accepts this form?
+
+ | 11 | 11 0A | Legacy fixed command | explicitly unsupported
+
+ | 12 | 12 0A | Legacy discovery request | implemented
+
+ | 16 | 16 0A | Legacy handshake follow-up | implemented
+
+ | 96 | 96 V (V XOR FF) | Raw acknowledgement; valid receipt clears active pending/missed fields | implemented
+
+ | C3/10 | 10 | Restart/reconnect signal in traced paths | implemented
+
+ | C3/11 | 11 | Framed discovery request | implemented
+
+ | C3/12 | 12 U32LE_A U32LE_B | Discovery metadata: board number and firmware version | implemented
+
+ | C3/13 | 13 | Discovery handshake exchange | implemented
+
+ | C3/14 | 14 U64LE | Framed core message 14 | explicitly unsupported
+
+ | C3/15 | 15 | Framed core message 15 | implemented
+
+ | C3/16 | 16 OPAQUE_BYTES | Framed core message 16 | explicitly unsupported
+
+ | C3/17 | 17 | Framed core message 17 | implemented
+
+ | C3/18 | 18 | Framed core message 18 | implemented
+
+ | AA/21 | 21 Q | Periodic status/liveness query; Q=1 in verified timer call site | explicitly unsupported
+
+ | AA/23 | 23 Q | Acknowledged-family message 23 | implemented
+
+ | AA/24 | 24 U16LE Q | Acknowledged-family message 24 | implemented
+
+ | AA/31 | 31 N UTF16LE[N] Q | UTF-16 string command | implemented
+
+ | AA/32 | 32 Q | Acknowledged-family message 32 | implemented
+
+ | AA/33 | 33 Q | Acknowledged-family message 33 | implemented
+
+ | AA/34 | 34 Q | Acknowledged-family message 34 | implemented
+
+ | AA/35 | 35 V Q | Initial configuration after discovery; configuration byte, Q=0 | explicitly unsupported
+
+ | D7/41 | 41 TYPE FLAG | Button lock/mask update | implemented
+
+ | D7/42 | 42 MODE FLAGS | Axis/wheel lock/mask update | implemented
+
+ | D7/43 | 43 VALUE FLAG | Keyboard mask update | implemented
+
+ | D7/44 | 44 | Keyboard initialization/clear-mask path; complete device effect unverified | implemented
+
+ | D7/51 | 51 SELECTOR ACTION | Mouse button state action | implemented
+
+ | D7/52 | 52 SELECTOR ACTION | Keyboard state action | implemented
+
+ | D7/53 | 53 SELECTOR DURATION_US_U32LE | Mouse click/timed button action | implemented
+
+ | D7/54 | 54 SELECTOR DURATION_US_U32LE | Timed key action | implemented
+
+ | D7/55 | 55 FIELD1_16LE FIELD2_16LE | Mouse movement fields | implemented
+
+ | D7/56 | 56 V | Wheel amount | implemented
+
+ | D7/57 | 57 PREFIX CONTROLLER_BLOCK | Controller state update | implemented
+
+ | D7/58 | 58 CONTROLLER_BLOCK | Controller state fields | implemented
+
+ | D7/61 | 61 V | Mouse proxy control/stop path | explicitly unsupported
+
+ | D7/62 | 62 PREFIX CHUNK* | Structured mouse proxy modification path | implemented
+
+Variable fields
+
+AA/31: N is the UTF-16LE byte count, even and at most 254; the serializer caps output at 127 UTF-16 code units. The trailing Q belongs to the body.
+
+D7/53 and /54: duration is unsigned microseconds, u32LE, saturating at 0xFFFFFFFF.
+
+D7/57 and /58: a controller block starts with flags. Bits 0..5 mark six optional 16-bit little-endian fields, emitted in increasing bit order. Bit 6 introduces a three-byte little-endian mask and three-byte masked state; only the low 18 mask bits are used. D7/57 has a prefix byte before the block.
+
+D7/62: prefix, then up to eight chunks. Each chunk's flags encode X width in bits 0..1 and Y width in bits 2..3 (0, 1 or 2 bytes); bits 4 and 5 include one-byte fields A and B. Nonzero X/Y use signed 8-bit where possible, otherwise signed 16-bit little-endian. There is no separate chunk-count byte. Complete meaning of the prefix and A/B remains unresolved.
+
+C3/16: opaque bytes; firmware contents and behavior were not analyzed.
+
+Correction to earlier notes: promotion sends AA/35 with Q=0. A valid AA/21 example with Q=0 is not evidence that the host sends it during initial discovery. AA/21 with Q=1 is verified in the timer path.
+
+Reconstructed serializer examples
+
+ | ID | Synthetic parameters | Wire bytes (hex)
+
+ | 11 | {} | 11 0A
+
+ | 12 | {} | 12 0A
+
+ | 16 | {} | 16 0A
+
+ | 96 | {"value": 90} | 96 5A A5
+
+ | C3/10 | {} | C3 04 10 C1 F3 00
+
+ | C3/11 | {} | C3 04 11 E0 E3 00
+
+ | C3/12 | {"word1": 1, "word2": 2} | C3 03 12 01 01 01 02 02 01 01 03 50 27 00
+
+ | C3/13 | {} | C3 04 13 A2 C3 00
+
+ | C3/14 | {"u64": "0x0102030405060708"} | C3 0C 14 08 07 06 05 04 03 02 01 A9 9B 00
+
+ | C3/15 | {} | C3 04 15 64 A3 00
+
+ | C3/16 | {"opaque_bytes": "01 00 02 FF"} | C3 03 16 01 05 02 FF F5 D6 00
+
+ | C3/17 | {} | C3 04 17 26 83 00
+
+ | C3/18 | {} | C3 04 18 C9 72 00
+
+ | AA/21 | {"trailer_byte": 90} | AA 05 21 5A 67 D3 00
+
+ | AA/23 | {"trailer_byte": 90} | AA 05 23 5A 05 B5 00
+
+ | AA/24 | {"trailer_byte": 90, "u16": 4660} | AA 07 24 34 12 5A B4 FE 00
+
+ | AA/31 | {"trailer_byte": 90, "text": "AB"} | AA 04 31 04 41 02 42 04 5A C8 25 00
+
+ | AA/32 | {"trailer_byte": 90} | AA 05 32 5A 47 85 00
+
+ | AA/33 | {"trailer_byte": 90} | AA 05 33 5A 76 B6 00
+
+ | AA/34 | {"trailer_byte": 90} | AA 05 34 5A E1 2F 00
+
+ | AA/35 | {"trailer_byte": 90, "value": 2} | AA 06 35 02 5A 14 7F 00
+
+ | D7/41 | {"first_wire_byte": 2, "second_wire_byte": 1} | D7 06 41 02 01 42 90 00
+
+ | D7/42 | {"first_wire_byte": 1, "second_wire_byte": 2} | D7 06 42 01 02 22 AC 00
+
+ | D7/43 | {"first_wire_byte": 2, "second_wire_byte": 1} | D7 06 43 02 01 22 FE 00
+
+ | D7/44 | {} | D7 04 44 B0 E9 00
+
+ | D7/51 | {"first_wire_byte": 2, "second_wire_byte": 1} | D7 06 51 02 01 21 D3 00
+
+ | D7/52 | {"first_wire_byte": 2, "second_wire_byte": 1} | D7 06 52 02 01 71 8A 00
+
+ | D7/53 | {"selector": 2, "duration_microseconds": 1000} | D7 05 53 02 E8 03 01 03 9E AC 00
+
+ | D7/54 | {"selector": 2, "duration_microseconds": 1000} | D7 05 54 02 E8 03 01 03 DF 64 00
+
+ | D7/55 | {"x": 10, "y": -20} | D7 03 55 0A 05 EC FF ED 04 00
+
+ | D7/56 | {"value": 5} | D7 05 56 05 B3 E9 00
+
+ | D7/57 | {"prefix": 3, "axes": [1000, null, -1000, null, 0, null], "mask": 5, "states": 1} | D7 08 57 03 55 E8 03 18 FC 01 02 05 01 02 01 01 03 58 A2 00
+
+ | D7/58 | {"axes": [1000, null, -1000, null, 0, null], "mask": 5, "states": 1} | D7 07 58 55 E8 03 18 FC 01 02 05 01 02 01 01 03 65 D2 00
+
+ | D7/61 | {"value": 5} | D7 05 61 05 B1 75 00
+
+ | D7/62 | {"prefix": 90, "chunks": [[1, -2, 3, 4], [200, -300, 0, 0]]} | D7 0A 62 5A 35 01 FE 03 04 0A C8 05 D4 FE AA 0C 00
+
+10. Host receive dispatch: all 52 registered entries
+
+Four tables contain 41 implemented entries, eight explicit rejection entries and three framing wrappers. These are host-side receive parsers, not a specification of the MCU's receive side. AA/22 is accepted from the board even though it is absent from the host serializer's 35 forms. Selected discovery/status paths have later offline execution coverage; the entire receive inventory was not emulation-tested.
+
+ | Family / ID | Status | Layout | Parser address
+
+ | outer/10 | implemented | 10 U32LE_A U32LE_B | 0x18002def0
+
+ | outer/11 | explicitly unsupported | Registered handler immediately returns an error; not an accepted incoming message. | 0x18002e130
+
+ | outer/12 | implemented | 12 (no payload consumed by this parser; newline not required here) | 0x18002df60
+
+ | outer/15 | explicitly unsupported | Registered handler immediately returns an error; not an accepted incoming message. | 0x18002e130
+
+ | outer/16 | implemented | 16 (no payload consumed by this parser; newline not required here) | 0x18002df70
+
+ | outer/3C | implemented | 3C BYTES_UNTIL_3E 3E (a <...> record) | 0x18002df80
+
+ | outer/44 | implemented | 44 (no payload consumed by this parser; newline not required here) | 0x18002e0c0
+
+ | outer/62 | implemented | 62 (no payload consumed by this parser; newline not required here) | 0x18002e0d0
+
+ | outer/63 | implemented | 63 (no payload consumed by this parser; newline not required here) | 0x18002e0e0
+
+ | outer/64 | implemented | 64 (no payload consumed by this parser; newline not required here) | 0x18002e0f0
+
+ | outer/65 | implemented | 65 (no payload consumed by this parser; newline not required here) | 0x18002e100
+
+ | outer/67 | implemented | 67 (no payload consumed by this parser; newline not required here) | 0x18002e110
+
+ | outer/69 | implemented | 69 (no payload consumed by this parser; newline not required here) | 0x18002e120
+
+ | outer/6B | explicitly unsupported | Registered handler immediately returns an error; not an accepted incoming message. | 0x18002e130
+
+ | outer/70 | implemented | 70 (no payload consumed by this parser; newline not required here) | 0x18002e140
+
+ | outer/96 | implemented | 96 V (V XOR FF) | 0x18002e150
+
+ | outer/AA | framing wrapper | AA COBS(BODY + CRC16LE) 00 | 0x18002e1b0
+
+ | outer/B2 | implemented | B2 (no payload consumed by this parser; newline not required here) | 0x18002e4f0
+
+ | outer/C3 | framing wrapper | C3 COBS(BODY + CRC16LE) 00 | 0x18002e500
+
+ | outer/D7 | framing wrapper | D7 COBS(BODY + CRC16LE) 00 | 0x18002e800
+
+ | C3/10 | implemented | 10 | 0x18002f520
+
+ | C3/11 | implemented | 11 | 0x18002f530
+
+ | C3/12 | implemented | 12 U32LE_A U32LE_B | 0x18002f540
+
+ | C3/13 | implemented | 13 | 0x18002f5b0
+
+ | C3/14 | explicitly unsupported | Registered handler immediately returns an error; not an accepted incoming message. | 0x18002f5c0
+
+ | C3/15 | implemented | 15 | 0x18002f5d0
+
+ | C3/16 | explicitly unsupported | Registered handler immediately returns an error; not an accepted incoming message. | 0x18002f5c0
+
+ | C3/17 | implemented | 17 | 0x18002f5e0
+
+ | C3/18 | implemented | 18 | 0x18002f5f0
+
+ | AA/21 | explicitly unsupported | Registered handler immediately returns an error; not an accepted incoming message. | 0x18002f600
+
+ | AA/22 | implemented | 22 FLAG U16LE_A U16LE_B LA LB LC LD STRING_A[LA] STRING_B[LB] STRING_C[LC] STRING_D[LD] Q | 0x18002f610
+
+ | AA/23 | implemented | 23 Q | 0x18002fb00
+
+ | AA/24 | implemented | 24 U16LE Q | 0x18002fb10
+
+ | AA/31 | implemented | 31 N UTF16LE[N] Q | 0x18002fb60
+
+ | AA/32 | implemented | 32 Q | 0x18002fdc0
+
+ | AA/33 | implemented | 33 Q | 0x18002fdd0
+
+ | AA/34 | implemented | 34 Q | 0x18002fde0
+
+ | AA/35 | explicitly unsupported | Registered handler immediately returns an error; not an accepted incoming message. | 0x18002f600
+
+ | D7/41 | implemented | 41 TYPE FLAG | 0x18002eb20
+
+ | D7/42 | implemented | 42 MODE FLAGS | 0x18002eb80
+
+ | D7/43 | implemented | 43 VALUE FLAG | 0x18002ebf0
+
+ | D7/44 | implemented | 44 | 0x18002e0c0
+
+ | D7/51 | implemented | 51 SELECTOR ACTION | 0x18002ec40
+
+ | D7/52 | implemented | 52 SELECTOR ACTION | 0x18002ecb0
+
+ | D7/53 | implemented | 53 SELECTOR DURATION_US_U32LE | 0x18002ed10
+
+ | D7/54 | implemented | 54 SELECTOR DURATION_US_U32LE | 0x18002eda0
+
+ | D7/55 | implemented | 55 FIELD1_16LE FIELD2_16LE | 0x18002ee10
+
+ | D7/56 | implemented | 56 V | 0x18002ee80
+
+ | D7/57 | implemented | 57 PREFIX CONTROLLER_BLOCK | 0x18002eeb0
+
+ | D7/58 | implemented | 58 CONTROLLER_BLOCK | 0x18002ef20
+
+ | D7/61 | explicitly unsupported | Registered handler immediately returns an error; not an accepted incoming message. | 0x18002ef80
+
+ | D7/62 | implemented | 62 PREFIX CHUNK* | 0x18002ef90
+
+The outer 3C entry handles <...> debug records. A recorded offline test reached the BOARD logger through a known pending transport before active-board promotion. Debug output therefore does not prove a completed handshake.
+
+11. Other driver interfaces and unresolved coverage
+
+The later inventory identifies controller custom IOCTLs 0x22E000 and 0x22E005 at handler 0x180019160. The former reaches a tag/record parser; the latter is described as connect-by-ID against a driver-owned connection table, with a deferred status completion. The supplied inventories do not establish a complete public buffer schema or client implementation for these operations.
+
+The virtual serial driver also has a serial IOCTL dispatcher. Silicon Labs transport IOCTL 0x222024 is separate from the Ferrum application command families. These surfaces are included to avoid presenting the serial/network lists as a complete inventory of all application-accessible behavior.
+
+No conclusion about universal security, absence of vulnerabilities, generic CP2102 compatibility or MCU firmware support follows from these inventories. The later notes' correction that the connection-engine worker makes no direct WSK calls also means its address alone should not be presented as a complete socket API specification.
+
+12. What must be demonstrated on the custom board
+
+Transport: verify the exact adapter variant, driver attachment, 8N1 settings, requested baud changes and USB control-request completion. Capture actual UART traffic in both directions.
+
+Discovery: observe the complete request, metadata and confirmation sequence on a wired MCU. Check that the driver promotes the transport and assigns a runtime board ID.
+
+Selection: send accurate AA/22 status and confirm that the intended mouse, keyboard or controller destination is selected.
+
+Liveness: keep the framed connection active over repeated timer periods, including realistic processing load; verify disconnect/reconnect and missed-response handling.
+
+Actions: for each advertised command family, verify the host request, actual board-wire message, MCU processing and resulting downstream effect. Test local-only API queries separately.
+
+Coverage: identify and test any additional UI, update, firmware or application checks required by the intended workflow before making a broader compatibility claim.
+
+The existing live adapter evidence shows successful USB OUT transfers and discovery-related activity with no connected MCU. It does not show completed board authentication, physical UART delivery, command execution or a functioning PCB replacement.
+
+“Ferrum 2.0.5's recovered host protocol can be implemented by an MCU connected through a compatible CP2102N adapter. Offline tests exercised discovery, role selection and acknowledgement handling in the original controller code. Live compatibility with an independent MCU, and passage of every Ferrum check, remain to be demonstrated.”
+
+13. Technical provenance
+
+Target: the analyzed Ferrum 2.0.5 controller. Binary SHA-256: c428536dc085e74cab9269fbbc0d47476fc382428da48beb8a74067055226f1d. This identifies the analyzed vendor binary, not a Git commit or an author's account.
+
+Primary research inputs: recovered serial command inventory; DHZ/KMNet command inventory; board-wire serializer and receive-table catalogue; original-code handshake/selection emulation results; live adapter-test summary; later custom-IOCTL inventory correction. This document consolidates those records, preserves their limits and applies the later handshake corrections to earlier message descriptions.
+
+Key analyzed entry points: discovery 0x18000E5D0; receive callback exercised offline 0x180015EF0; serializer 0x180030330; serial parser 0x180023580; common KM handler 0x180027130. Addresses describe this build and are not portable API entry points.
+
+External transport reference: Silicon Labs AN571: CP210x Virtual COM Port Interface, especially section 5.18 for CP2102N SET_RECEIVE.
+
+This standalone document includes no raw capture, executable, project database, Git history or embedded research archive. It does not name the research machine, account or local folders.
+
+Evidence status: static reverse engineering and recorded offline validation, with limited adapter-only live observations. Custom-MCU end-to-end compatibility is unverified.

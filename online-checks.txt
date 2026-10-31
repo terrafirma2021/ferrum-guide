@@ -1,0 +1,44 @@
+FERRUM 2.0.5 — DESKTOP APP ONLINE-CHECK REVIEW
+
+Finding
+The inspected desktop app has update-server communication. No online
+genuine-board approval, account login or licence validation was identified
+in the traced HTTP paths. This does not establish that every possible
+execution path or other component lacks such checks.
+
+Code evidence
+Shared request routine: 0x140093EB0.
+Its three direct callers construct requests to https://update.xferrum.dev/:
+
+1. 0x14108AF60: latest.json.
+   Parses a version record and SHA-256 field after checking HTTP status 200.
+2. 0x14108B800: versions.json.
+   Retrieves a version list and checks HTTP status 200.
+3. 0x140093230: versions/{major}.{minor}.{patch}.msi.
+   Formats the versioned installer URL and checks HTTP status 200.
+
+Direct CALL instructions into the shared routine were independently found
+in the executable at 0x140093407, 0x14108B04A and 0x14108B8D1. These agree
+with the recovered function call sites. The examined callers do not append
+a board identifier, licence key or authentication token to their requests.
+The common request-building path showed no Ferrum-specific authentication
+step. Generic TLS/X.509 authentication-related strings were present in
+bundled libraries; those alone do not indicate product authentication.
+
+The version-record conversion at 0x140093830 handles version parsing and
+a 64-character hexadecimal hash. The latest-version fetch is consumed by
+the app's update-manager paths, including 0x140056ED0 and 0x140057240.
+
+Limits
+This review examined existing binary and decompilation evidence. It did
+not launch the app, install software, send packets to Ferrum, capture a
+live network session or test a custom MCU. Direct-call coverage does not
+prove the absence of every indirect or alternative networking path.
+Server implementation, encrypted MCU firmware, other builds and future
+versions are outside this finding.
+
+Practical meaning
+There is evidence for update checks, not a demonstrated remote hardware
+authenticity gate. An MCU still needs to satisfy the local transport,
+discovery, status/selection and liveness protocol. This result does not
+justify saying that a custom board passes every Ferrum check.
